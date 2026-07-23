@@ -1,0 +1,36 @@
+{
+  "mode": "window",
+  "region": null,
+  "window": {
+    "window_id": 12345,
+    "owner": "Safari",
+    "name": "Example Window Title",
+    "bounds": { "x": 0, "y": 33, "width": 1280, "height": 800 },
+    "subregion": {
+      "rel_x": 0.1,
+      "rel_y": 0.1,
+      "rel_width": 0.3,
+      "rel_height": 0.1
+    }
+  },
+  "colors": [
+    {
+      "name": "Red Alert",
+      "hex": "#FF0000",
+      "tolerance": 30,
+      "message": "Red detected: {text}"
+    }
+  ],
+  "poll_interval": 1.0,
+  "cooldown": 5,
+  "confirm_delay": 0.5,
+  "rainbow_mode": false,
+  "ocr_word_list": [
+    { "word": "Example", "color": "orange" },
+    { "word": "Word", "color": null }
+  ],
+  "ocr_key_combos": [
+    ["Example", "Word"]
+  ],
+  "notification_sound": "Glass"
+}

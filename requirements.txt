@@ -1,0 +1,5 @@
+mss
+numpy
+Pillow
+pyobjc-framework-Quartz
+pyobjc-framework-Vision
