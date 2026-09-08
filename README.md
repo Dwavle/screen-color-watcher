@@ -95,3 +95,7 @@ python watch_color.py
 - `ocr.py` — text extraction via macOS's Vision framework
 - `config.json` — your personal saved setup (gitignored, generated on first run)
 - `config.example.json` — example showing the config file's structure
+
+## License
+
+MIT — see [LICENSE](LICENSE).

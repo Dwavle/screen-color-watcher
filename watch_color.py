@@ -362,7 +362,7 @@ def main() -> None:
     parser.add_argument("--pick-window", action="store_true",
                          help="Interactively click a window to watch (survives being covered by other windows). "
                               "Only works if the window is visible at the click point -- use --list-windows / "
-                              "--select-window if it's fully hidden behind other windows.")
+                              "--window-owner if it's fully hidden behind other windows.")
     parser.add_argument("--list-windows", action="store_true",
                          help="Print all open windows (app name + title), then exit. Use with --window-owner.")
     parser.add_argument("--window-owner", metavar="APP_NAME",
@@ -389,7 +389,7 @@ def main() -> None:
     parser.add_argument("--clear-colors", action="store_true", help="Remove all previously configured colors")
     parser.add_argument("--tolerance", type=int, default=30, help="Default color-match tolerance (0-441, default 30)")
     parser.add_argument("--interval", type=float, help="Polling interval in seconds (default 1.0)")
-    parser.add_argument("--cooldown", type=float, help="Seconds to wait before re-alerting on the same color (default 30)")
+    parser.add_argument("--cooldown", type=float, help="Seconds to wait before re-alerting on the same color (default 5)")
     parser.add_argument("--confirm-delay", type=float,
                          help="Seconds to wait and re-check before alerting, to filter out momentary flicker "
                               "(e.g. a rainbow loading transition). 0 disables this check. Default 0.5")
