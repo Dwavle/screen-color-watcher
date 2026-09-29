@@ -11,7 +11,8 @@ Optional features layered on top of basic color detection:
 - **Fuzzy word-list correction** — snap garbled OCR text (e.g. `Eric`) onto known-good vocabulary
   (e.g. `Epic`), and optionally color individual words in terminal output.
 - **Key combos** — only actually notify when specific *combinations* of words appear together
-  (e.g. `Legendary + Galactic`), while every detection still always prints to the terminal.
+  *within the same on-screen message*, while every detected message still always prints to the
+  terminal.
 - **Rainbow mode** — suppress alerts when every monitored color shows up in the same frame at
   once (useful for filtering out a loading/transition flash that happens to hit every color).
 
@@ -58,25 +59,38 @@ python watch_color.py
 
 ### Managing colors
 
-- `--add-color "#RRGGBB[:Name[:Tolerance[:Message]]]"` — add a color to watch for, e.g.
-  `--add-color "#b4aeb1:Beskar:30:beskar detected"`. Include `{text}` in the message to substitute
-  OCR'd text from the watched area.
+- `--add-color "#RRGGBB[:Name[:Tolerance[:Message]]]"` — add a color to watch for. Including
+  `{text}` in MESSAGE (e.g. `--add-color "#d78a3d:Legendary:30:{text}"`) marks this color as an
+  **OCR trigger**: it doesn't matter which specific color triggers OCR, or what MESSAGE says
+  around `{text}` — see "OCR-triggered colors" below for what actually gets printed/notified.
+  Without `{text}`, MESSAGE is used as a fixed notification, sent immediately whenever that color
+  is detected (no OCR involved at all), e.g. `--add-color "#FF0000:Red Alert:30:Red detected!"`.
 - `--remove-color NAME_OR_HEX` / `--clear-colors`
+
+### OCR-triggered colors, key combos, and message separation
+
+If any color configured with `{text}` matches, OCR runs **at most once per poll**, no matter how
+many such colors matched — which one(s) triggered it doesn't affect the output. The watched area
+is often showing several distinct messages stacked at once (one printed just under the last), so
+the OCR result is split into separate lines and each is treated as its own independent message:
+
+- Each line is printed on its own, with no per-color prefix — just the (corrected, colorized)
+  text of that message.
+- `--ocr-key-combo "Word1,Word2,..."` — only notify for a line whose words contain **all** of a
+  combo (repeatable, OR'd across combos; combos are checked against one line at a time, never
+  across two different messages). No combos configured = always notify every detected line.
+- `--remove-key-combo "Word1,Word2,..."` / `--clear-key-combos`
+- Every line that passes gets its own separate notification — two genuinely different messages
+  in the same poll means two notifications, not one merged one.
 
 ### OCR word list (fuzzy correction + terminal coloring)
 
-- `--ocr-words "Word1,Word2,..."` — known-good vocabulary that `{text}` output gets snapped onto
+- `--ocr-words "Word1,Word2,..."` — known-good vocabulary that OCR'd lines get snapped onto
+  (also drops any word in a line with no good-enough match)
 - `--ocr-word-color "Word:Color"` — color a word in terminal output (not the notification itself,
   which can't render color). Named colors: `gray`, `light_blue`, `purple`, `orange`,
   `reddish_pink`, `red`, `pink`, `green`, `blue`, `yellow`, `white`, `rainbow` (cycles per
   character), or any `#RRGGBB` hex code.
-
-### Key combos (gate notifications on word combinations)
-
-- `--ocr-key-combo "Word1,Word2,..."` — only notify when all words in this combo appear together
-  in the corrected OCR text (repeatable, OR'd across combos). No combos configured = always
-  notify on a confirmed color match.
-- `--remove-key-combo "Word1,Word2,..."` / `--clear-key-combos`
 
 ### Timers (scheduled reminder notifications)
 
@@ -96,6 +110,8 @@ configured at all.
 - `--cooldown SECONDS` — minimum time between repeat alerts for the same color (default 5)
 - `--confirm-delay SECONDS` — re-check before alerting to filter out momentary flicker (default
   0.5, set to 0 to disable)
+- `--detection-timeout SECONDS` — exit if the target window/region can't be captured for this many
+  consecutive seconds, e.g. the window was closed (default 60, set to 0 to retry forever instead)
 - `--rainbow-mode {on,off}` — suppress alerts when every configured color is seen at once
 - `--show-config` — print the current saved config
 

@@ -54,6 +54,8 @@ DEFAULTS = {
     "poll_interval": 1.0,
     "cooldown": 5,
     "confirm_delay": 0.5,  # re-check before alerting, to filter out momentary flicker
+    "detection_timeout": 60,  # exit if the window/region can't be captured for this many consecutive
+                              # seconds (closed, minimized, unplugged, etc). 0 disables the timeout.
     "rainbow_mode": False,  # if on, suppress alerts when every monitored color is seen at once
     "ocr_word_list": [],  # [{"word": str, "color": str or None}] -- known-good words to snap fuzzy/misread
                           # OCR text onto, optionally colored in terminal output
@@ -155,6 +157,22 @@ def correct_ocr_text(text: str, word_list: list[str], cutoff: float = 0.6) -> st
         if match:
             kept.append(lower_to_original[match[0]])
     return " ".join(kept)
+
+
+def correct_ocr_lines(text: str, word_list: list[str], cutoff: float = 0.6) -> list[str]:
+    """Like correct_ocr_text, but keeps each OCR'd line as its own separate
+    message instead of flattening everything into one bag of words. Several
+    unrelated messages are often visible in the watched area at once (each
+    printed just under the last) -- pooling their words together let a key
+    combo like ["Stellar","Mythic"] false-match across two different lines
+    that each only contained one of those words. Lines that correct down to
+    nothing (no word in them was close enough to the word list) are dropped."""
+    lines = []
+    for raw_line in text.split("\n"):
+        corrected = correct_ocr_text(raw_line.strip(), word_list, cutoff)
+        if corrected:
+            lines.append(corrected)
+    return lines
 
 
 def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
@@ -333,6 +351,7 @@ def run_watch(config: dict) -> None:
     last_alert: dict[str, float] = {}
     last_warning = 0.0
     last_rainbow_log = 0.0
+    first_capture_failure: float | None = None  # when the current streak of failed captures began
 
     with mss.MSS() as sct:
         while True:
@@ -354,12 +373,22 @@ def run_watch(config: dict) -> None:
             frame = capture_frame(config, sct)
 
             if frame is None:
+                if first_capture_failure is None:
+                    first_capture_failure = now
                 if now - last_warning >= 10:
                     print(f"[{time.strftime('%H:%M:%S')}] Warning: target window not found "
                           "(closed or minimized?). Retrying...")
                     last_warning = now
+                timeout = config.get("detection_timeout", 60)
+                if timeout and now - first_capture_failure >= timeout:
+                    message = f"Lost the window/region for {timeout:.0f}s -- stopping."
+                    print(f"[{time.strftime('%H:%M:%S')}] {message}")
+                    send_notification("Color Watcher Stopped", message, config.get("notification_sound"))
+                    sys.exit(message)
                 time.sleep(config["poll_interval"])
                 continue
+
+            first_capture_failure = None
 
             rgb_by_name = {c["name"]: hex_to_rgb(c["hex"]) for c in colors}
             matched = [c for c in colors if color_present(frame, rgb_by_name[c["name"]], c["tolerance"])]
@@ -375,60 +404,73 @@ def run_watch(config: dict) -> None:
                 time.sleep(config["poll_interval"])
                 continue
 
-            for color in matched:
-                rgb = rgb_by_name[color["name"]]
-                since_last = now - last_alert.get(color["name"], 0)
-                if since_last >= config["cooldown"]:
-                    # Re-sample the same area after a short delay before alerting --
-                    # filters out momentary flicker (e.g. a rainbow loading transition)
-                    # that happens to match on a single frame but isn't a real hit.
-                    confirm_delay = config.get("confirm_delay", 0.5)
-                    alert_frame = frame
-                    if confirm_delay > 0:
-                        time.sleep(confirm_delay)
-                        confirm_frame = capture_frame(config, sct)
-                        if confirm_frame is None or not color_present(confirm_frame, rgb, color["tolerance"]):
-                            continue
+            # Colors that matched and are past their per-color cooldown are candidates
+            # to alert this poll.
+            eligible = [c for c in matched if now - last_alert.get(c["name"], 0) >= config["cooldown"]]
+
+            if eligible:
+                # Re-sample once after a short delay before alerting -- filters out
+                # momentary flicker (e.g. a rainbow loading transition) that happens to
+                # match on a single frame but isn't a real hit. Shared across every
+                # color eligible this poll rather than one re-sample per color.
+                confirm_delay = config.get("confirm_delay", 0.5)
+                alert_frame = frame
+                if confirm_delay > 0:
+                    time.sleep(confirm_delay)
+                    confirm_frame = capture_frame(config, sct)
+                    if confirm_frame is None:
+                        eligible = []
+                    else:
                         alert_frame = confirm_frame
+                        eligible = [c for c in eligible
+                                    if color_present(alert_frame, rgb_by_name[c["name"]], c["tolerance"])]
 
-                    ts = time.strftime("%H:%M:%S")
-                    template = color.get("message") or f"Detected {color['name']} ({color['hex']})"
-                    message = template
-                    terminal_display = template
-                    should_notify = True
-                    if "{text}" in template:
-                        word_entries = config.get("ocr_word_list", [])
-                        word_list = [w["word"] for w in word_entries]
-                        color_by_word = {w["word"].lower(): w.get("color") for w in word_entries}
+            if eligible:
+                ts = time.strftime("%H:%M:%S")
 
-                        recognized = extract_text(alert_frame).strip()
-                        recognized = correct_ocr_text(recognized, word_list)
-                        recognized = recognized.replace("\n", " | ")
+                word_entries = config.get("ocr_word_list", [])
+                word_list = [w["word"] for w in word_entries]
+                color_by_word = {w["word"].lower(): w.get("color") for w in word_entries}
+                key_combos = config.get("ocr_key_combos", [])
 
-                        plain_text = recognized or "(no text found)"
-                        colorized_text = " ".join(
-                            colorize_word(w, color_by_word.get(w.lower())) for w in recognized.split()
-                        ) if recognized else plain_text
+                # A color with "{text}" in its message is just a trigger for OCR --
+                # which specific color caused it no longer matters, since OCR runs at
+                # most once per poll regardless of how many such colors matched, and
+                # the console/notification content below is the on-screen message
+                # itself, not a per-color template.
+                fixed_colors = [c for c in eligible if "{text}" not in (c.get("message") or "")]
+                if any(c not in fixed_colors for c in eligible):
+                    # Several unrelated messages are often visible in the watched area
+                    # at once (each stacked under the last) -- treat every OCR'd line
+                    # as its own separate message rather than pooling their words
+                    # together, which used to let a key combo like ["Stellar","Mythic"]
+                    # false-match across two lines that each only had one of those words.
+                    lines = correct_ocr_lines(extract_text(alert_frame).strip(), word_list)
+                    if not lines:
+                        lines = ["(no text found)"]
 
-                        message = template.replace("{text}", plain_text)
-                        terminal_display = template.replace("{text}", colorized_text)
-
-                        # If key combos are configured, only actually notify when the
-                        # corrected OCR text contains ALL words of at least one combo
-                        # -- always print the detection either way, so nothing is
-                        # silently lost from view.
-                        key_combos = config.get("ocr_key_combos", [])
+                    for line in lines:
+                        tokens = {w.lower() for w in line.split()}
+                        should_notify = True
                         if key_combos:
-                            recognized_tokens = {w.lower() for w in recognized.split()}
                             should_notify = any(
-                                all(word.lower() in recognized_tokens for word in combo)
-                                for combo in key_combos
+                                all(word.lower() in tokens for word in combo) for combo in key_combos
                             )
 
-                    suffix = "" if should_notify else "  (no key-combo match -- notification suppressed)"
-                    print(f"[{ts}] {terminal_display}{suffix}")
-                    if should_notify:
-                        send_notification("Color Alert", message, config.get("notification_sound"))
+                        colorized = " ".join(colorize_word(w, color_by_word.get(w.lower())) for w in line.split())
+                        suffix = "" if should_notify else "  (no key-combo match -- notification suppressed)"
+                        print(f"[{ts}] {colorized}{suffix}")
+                        if should_notify:
+                            send_notification("Color Alert", line, config.get("notification_sound"))
+
+                # Fixed-message colors (no {text}) don't involve OCR at all -- keep
+                # notifying them immediately with their own configured message.
+                for color in fixed_colors:
+                    message = color.get("message") or f"Detected {color['name']} ({color['hex']})"
+                    print(f"[{ts}] {message}")
+                    send_notification("Color Alert", message, config.get("notification_sound"))
+
+                for color in eligible:
                     last_alert[color["name"]] = time.time()
 
             time.sleep(config["poll_interval"])
@@ -457,10 +499,13 @@ def main() -> None:
     parser.add_argument("--clear-subregion", action="store_true",
                          help="Remove a previously set sub-region; go back to watching the whole window.")
     parser.add_argument("--add-color", action="append", default=[], metavar="HEX[:NAME[:TOLERANCE[:MESSAGE]]]",
-                         help="Add a target color, e.g. '#b4aeb1:Beskar:30:beskar detected'. "
-                              "MESSAGE overrides the default notification text. Include the literal text "
-                              "'{text}' in MESSAGE to OCR the watched area and substitute whatever text was "
-                              "found there, e.g. '#ffffff:Error:30:Error seen: {text}'. Can be repeated.")
+                         help="Add a target color, e.g. '#b4aeb1:Beskar:30:beskar detected'. Include the "
+                              "literal text '{text}' anywhere in MESSAGE (e.g. '#d78a3d:Legendary:30:{text}') "
+                              "to make this color an OCR trigger -- when it matches, OCR runs and each detected "
+                              "on-screen message is printed/notified on its own, regardless of which color(s) "
+                              "triggered it or what the rest of MESSAGE says. Without '{text}', MESSAGE is used "
+                              "as-is as a fixed notification sent immediately on a match, no OCR involved. "
+                              "Can be repeated.")
     parser.add_argument("--remove-color", action="append", default=[], metavar="NAME_OR_HEX",
                          help="Remove a previously added color by its name or hex code. Can be repeated.")
     parser.add_argument("--clear-colors", action="store_true", help="Remove all previously configured colors")
@@ -470,6 +515,10 @@ def main() -> None:
     parser.add_argument("--confirm-delay", type=float,
                          help="Seconds to wait and re-check before alerting, to filter out momentary flicker "
                               "(e.g. a rainbow loading transition). 0 disables this check. Default 0.5")
+    parser.add_argument("--detection-timeout", type=float,
+                         help="Exit if the target window/region can't be captured for this many consecutive "
+                              "seconds (e.g. the window was closed). 0 disables the timeout, so it retries "
+                              "forever as before. Default 60")
     parser.add_argument("--rainbow-mode", choices=["on", "off"],
                          help="If 'on', suppress alerts entirely when every monitored color is detected in the "
                               "same frame (e.g. a rainbow flash that happens to hit all your configured colors "
@@ -601,6 +650,8 @@ def main() -> None:
         config["cooldown"] = args.cooldown
     if args.confirm_delay is not None:
         config["confirm_delay"] = args.confirm_delay
+    if args.detection_timeout is not None:
+        config["detection_timeout"] = args.detection_timeout
     if args.rainbow_mode is not None:
         config["rainbow_mode"] = args.rainbow_mode == "on"
     if args.ocr_words is not None:
