@@ -78,6 +78,18 @@ python watch_color.py
   notify on a confirmed color match.
 - `--remove-key-combo "Word1,Word2,..."` / `--clear-key-combos`
 
+### Timers (scheduled reminder notifications)
+
+Independent of color watching — a timer can be used on its own, with no window/region/color
+configured at all.
+
+- `--add-timer "START|INTERVAL|MESSAGE"` — notify at `START` (a 24-hour time of day, `HH:MM` or
+  `HH:MM:SS`; if that time has already passed today, the first alert fires tomorrow), then every
+  `INTERVAL` seconds after that, with `MESSAGE` as the notification text. E.g.
+  `--add-timer "15:00|1800|Stretch break"` notifies at 3:00pm and every 30 minutes after. Can be
+  repeated.
+- `--remove-timer "MESSAGE_OR_START"` / `--clear-timers`
+
 ### Other options
 
 - `--interval SECONDS` — polling interval (default 1.0)

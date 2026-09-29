@@ -32,5 +32,8 @@
   "ocr_key_combos": [
     ["Example", "Word"]
   ],
+  "timers": [
+    { "start": "15:00:00", "interval": 1800, "message": "Stretch break" }
+  ],
   "notification_sound": "Glass"
 }

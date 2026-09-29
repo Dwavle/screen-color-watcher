@@ -16,6 +16,7 @@ Usage:
     python watch_color.py --add-color "#b4aeb1:Beskar:30:beskar detected"  # custom message
     python watch_color.py --window-owner Safari --pick-subregion --add-color "#b4aeb1:Beskar"  # watch just
                                                                                                    # part of the window
+    python watch_color.py --add-timer "15:00|1800|Stretch break"   # also notify at 3pm, then every 30 min
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ import json
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import mss
@@ -59,6 +61,9 @@ DEFAULTS = {
                            # OCR text contains ALL words of at least one combo (still always prints to
                            # terminal). E.g. [["Legendary","Galactic"]] notifies for that pair but not for
                            # "Legendary Diamond". Empty = always notify, as before.
+    "timers": [],  # [{"start": "HH:MM:SS", "interval": float, "message": str}] -- reminder notifications on
+                   # a schedule, independent of color watching. First alert at "start" (today, or tomorrow if
+                   # that time has already passed), then every "interval" seconds after that.
     "notification_sound": "Glass",
 }
 
@@ -72,6 +77,7 @@ NAMED_TERMINAL_COLORS = {
     "red": (220, 20, 60),
     "pink": (255, 105, 180),
     "green": (46, 204, 113),
+    "lime_green": (170, 255, 50),
     "blue": (52, 120, 246),
     "yellow": (255, 215, 0),
     "white": (255, 255, 255),
@@ -172,6 +178,45 @@ def parse_color_arg(arg: str, default_tolerance: int) -> dict:
     return color
 
 
+def parse_time_of_day(s: str) -> tuple[int, int, int]:
+    """Parse a 24-hour clock time as 'HH:MM' or 'HH:MM:SS' into (hour, minute, second)."""
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            t = datetime.strptime(s, fmt)
+            return t.hour, t.minute, t.second
+        except ValueError:
+            continue
+    raise ValueError(f"Invalid time {s!r}, expected 24-hour 'HH:MM' or 'HH:MM:SS'")
+
+
+def next_occurrence(hour: int, minute: int, second: int, after: float) -> float:
+    """Epoch timestamp of the next HH:MM:SS at or after `after` (today if it
+    hasn't happened yet, otherwise tomorrow)."""
+    candidate = datetime.fromtimestamp(after).replace(hour=hour, minute=minute, second=second, microsecond=0)
+    if candidate.timestamp() < after:
+        candidate += timedelta(days=1)
+    return candidate.timestamp()
+
+
+def parse_timer_arg(arg: str) -> dict:
+    # Format: "START|INTERVAL|MESSAGE" -- '|' rather than ':' since START itself
+    # contains colons (HH:MM[:SS]).
+    parts = arg.split("|", 2)
+    if len(parts) != 3:
+        raise ValueError(f"Invalid --add-timer {arg!r}, expected 'START|INTERVAL|MESSAGE'")
+    start_raw, interval_raw, message = (p.strip() for p in parts)
+    hour, minute, second = parse_time_of_day(start_raw)
+    try:
+        interval = float(interval_raw)
+    except ValueError:
+        raise ValueError(f"Invalid interval {interval_raw!r} in --add-timer {arg!r}, expected seconds")
+    if interval <= 0:
+        raise ValueError(f"Interval must be > 0 in --add-timer {arg!r}")
+    if not message:
+        raise ValueError(f"Missing message in --add-timer {arg!r}")
+    return {"start": f"{hour:02d}:{minute:02d}:{second:02d}", "interval": interval, "message": message}
+
+
 def _escape_applescript(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -238,33 +283,51 @@ def capture_frame(config: dict, sct: "mss.base.MSSBase | None") -> np.ndarray | 
 
 
 def run_watch(config: dict) -> None:
-    if config["mode"] == "window":
-        if not config["window"]:
-            sys.exit("No window configured. Run with --pick-window first.")
-        w = config["window"]
-        target_desc = f"window '{w['name'] or w['owner']}' ({w['owner']})"
-        if w.get("subregion"):
-            target_desc += " [sub-region]"
-    elif config["mode"] == "region":
-        if not config["region"]:
-            sys.exit("No region configured. Run with --pick-region first.")
-        target_desc = f"region {config['region']}"
-    else:
-        sys.exit("Nothing configured yet. Run with --pick-window or --pick-region first.")
+    colors = config.get("colors", [])
+    timers = config.get("timers", [])
+    watching_colors = bool(colors)
 
-    colors = config["colors"]
-    if not colors:
-        sys.exit("No colors configured. Run with --add-color '#RRGGBB:Name'.")
-
-    print(f"Watching {target_desc} for colors: "
-          f"{', '.join(c['name'] + ' ' + c['hex'] for c in colors)}")
-    print(f"Poll interval: {config['poll_interval']}s, cooldown: {config['cooldown']}s, "
-          f"confirm delay: {config.get('confirm_delay', 0.5)}s")
-    if config.get("rainbow_mode"):
-        if len(colors) > 1:
-            print("Rainbow mode: ON (alerts suppressed if all colors are seen at once)")
+    target_desc = None
+    if watching_colors:
+        if config["mode"] == "window":
+            if not config["window"]:
+                sys.exit("No window configured. Run with --pick-window first.")
+            w = config["window"]
+            target_desc = f"window '{w['name'] or w['owner']}' ({w['owner']})"
+            if w.get("subregion"):
+                target_desc += " [sub-region]"
+        elif config["mode"] == "region":
+            if not config["region"]:
+                sys.exit("No region configured. Run with --pick-region first.")
+            target_desc = f"region {config['region']}"
         else:
-            print("Rainbow mode: ON, but has no effect with only 1 color configured")
+            sys.exit("Nothing configured yet. Run with --pick-window or --pick-region first.")
+
+    if not watching_colors and not timers:
+        sys.exit("Nothing configured yet. Add a color with --add-color and a window/region, "
+                  "or a reminder with --add-timer.")
+
+    if watching_colors:
+        print(f"Watching {target_desc} for colors: "
+              f"{', '.join(c['name'] + ' ' + c['hex'] for c in colors)}")
+        print(f"Poll interval: {config['poll_interval']}s, cooldown: {config['cooldown']}s, "
+              f"confirm delay: {config.get('confirm_delay', 0.5)}s")
+        if config.get("rainbow_mode"):
+            if len(colors) > 1:
+                print("Rainbow mode: ON (alerts suppressed if all colors are seen at once)")
+            else:
+                print("Rainbow mode: ON, but has no effect with only 1 color configured")
+
+    # Next-fire epoch timestamp per timer, kept only for this run (not persisted).
+    now = time.time()
+    timer_next: dict[int, float] = {}
+    for i, t in enumerate(timers):
+        hour, minute, second = parse_time_of_day(t["start"])
+        timer_next[i] = next_occurrence(hour, minute, second, now)
+        print(f"Timer '{t['message']}': first alert at "
+              f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timer_next[i]))}, "
+              f"every {t['interval']}s after that")
+
     print("Press Ctrl+C to stop.\n")
 
     last_alert: dict[str, float] = {}
@@ -273,8 +336,22 @@ def run_watch(config: dict) -> None:
 
     with mss.MSS() as sct:
         while True:
-            frame = capture_frame(config, sct)
             now = time.time()
+
+            for i, t in enumerate(timers):
+                if now >= timer_next[i]:
+                    print(f"[{time.strftime('%H:%M:%S')}] Timer: {t['message']}")
+                    send_notification("Timer", t["message"], config.get("notification_sound"))
+                    # Advance past `now` rather than firing a burst of catch-up
+                    # alerts if the loop was delayed (e.g. system sleep).
+                    while timer_next[i] <= now:
+                        timer_next[i] += t["interval"]
+
+            if not watching_colors:
+                time.sleep(config["poll_interval"])
+                continue
+
+            frame = capture_frame(config, sct)
 
             if frame is None:
                 if now - last_warning >= 10:
@@ -417,6 +494,17 @@ def main() -> None:
     parser.add_argument("--remove-key-combo", action="append", default=[], metavar="WORD1,WORD2,...",
                          help="Remove a previously added combo (must match the same words, any order). Can be repeated.")
     parser.add_argument("--clear-key-combos", action="store_true", help="Remove all configured key combos")
+    parser.add_argument("--add-timer", action="append", default=[], metavar="START|INTERVAL|MESSAGE",
+                         help="Add a recurring reminder notification, independent of color watching (can be "
+                              "used with no colors/window/region configured at all). START is a 24-hour time "
+                              "of day ('HH:MM' or 'HH:MM:SS') for the first alert -- if that time has already "
+                              "passed today, the first alert fires tomorrow. INTERVAL is the number of seconds "
+                              "between repeats after that. MESSAGE is the notification text. Example: "
+                              "'--add-timer \"15:00|1800|Stretch break\"' notifies at 3:00pm and every 30 "
+                              "minutes after. Can be repeated.")
+    parser.add_argument("--remove-timer", action="append", default=[], metavar="MESSAGE_OR_START",
+                         help="Remove a previously added timer by its message or its start time. Can be repeated.")
+    parser.add_argument("--clear-timers", action="store_true", help="Remove all configured timers")
     parser.add_argument("--show-config", action="store_true", help="Print the current config and exit")
     args = parser.parse_args()
 
@@ -553,15 +641,40 @@ def main() -> None:
         else:
             print(f"Removed key combo: {raw!r}")
 
+    if args.clear_timers:
+        config["timers"] = []
+
+    for target in args.remove_timer:
+        before = len(config["timers"])
+        config["timers"] = [
+            t for t in config["timers"]
+            if t["message"].lower() != target.lower() and t["start"] != target
+        ]
+        if len(config["timers"]) == before:
+            print(f"Warning: no timer matching {target!r} found.")
+        else:
+            print(f"Removed timer {target!r}.")
+
+    for raw in args.add_timer:
+        try:
+            timer = parse_timer_arg(raw)
+        except ValueError as e:
+            sys.exit(str(e))
+        config["timers"].append(timer)
+        print(f"Added timer: {timer['start']} then every {timer['interval']}s -- {timer['message']!r}")
+
     save_config(config)
 
     if (args.pick_window or args.pick_region or args.window_owner or args.add_color or args.clear_colors
             or args.remove_color or args.pick_subregion or args.clear_subregion or args.rainbow_mode is not None
             or args.ocr_key_combo or args.remove_key_combo or args.clear_key_combos
-            or args.ocr_words is not None or args.ocr_word_color):
+            or args.ocr_words is not None or args.ocr_word_color
+            or args.add_timer or args.remove_timer or args.clear_timers):
         has_target = config["mode"] == "window" and config["window"] or config["mode"] == "region" and config["region"]
-        if not has_target or not config["colors"]:
-            print("Config saved. Run again once both a target (window/region) and at least one color are configured.")
+        colors_need_target = config["colors"] and not has_target
+        nothing_to_watch = not config["colors"] and not config["timers"]
+        if colors_need_target or nothing_to_watch:
+            print("Config saved. Run again once a target (window/region) + color, or a timer, is configured.")
             return
 
     run_watch(config)
